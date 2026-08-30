@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgl - animation - coding</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="main.css">
+		<style>
+			#info span {
+				color: #7fd4ff;
+			}
+		</style>
+	</head>
+	<body>
+		<div id="container"></div>
+		<div id="info">
+			<b>3D Coding Animation</b> — built with your own three.js repo (v0.185.0) <span>·</span> the editor types real three.js code by itself<br/>
+			drag to orbit · scroll to zoom
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.module.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three';
+
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+			// ------------------------------------------------------------------
+			// code snippets that get "typed" on the 3D editor panel
+			// ------------------------------------------------------------------
+
+			const SNIPPETS = [ {
+				file: 'cube.js',
+				source: `// coding animation - three.js
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color( 0x000000 );
+
+const cube = new THREE.Mesh(
+  new THREE.BoxGeometry( 0.2, 0.2, 0.2 ),
+  new THREE.MeshNormalMaterial()
+);
+scene.add( cube );
+
+function animate() {
+  cube.rotation.x += 0.01;
+  cube.rotation.y += 0.01;
+  renderer.render( scene, camera );
+}
+renderer.setAnimationLoop( animate );`
+			}, {
+				file: 'particles.js',
+				source: `// 1000 floating particles
+const count = 1000;
+const positions = new Float32Array( count * 3 );
+
+for ( let i = 0; i < count; i ++ ) {
+  positions[ i * 3 + 0 ] = ( Math.random() - 0.5 ) * 10;
+  positions[ i * 3 + 1 ] = ( Math.random() - 0.5 ) * 10;
+  positions[ i * 3 + 2 ] = ( Math.random() - 0.5 ) * 10;
+}
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute(
+  'position', new THREE.BufferAttribute( positions, 3 )
+);`
+			}, {
+				file: 'shader.js',
+				source: `// a tiny fragment shader
+const material = new THREE.ShaderMaterial( {
+  uniforms: { time: { value: 0 } },
+  fragmentShader: '
+    void main() {
+      float v = sin( time + gl_FragCoord.x * 0.02 );
+      gl_FragColor = vec4( v, 1.0 - v, 0.5, 1.0 );
+    }
+  '
+} );`
+			} ];
+
+			// ------------------------------------------------------------------
+			// renderer / scene / camera
+			// ------------------------------------------------------------------
+
+			const container = document.getElementById( 'container' );
+			const renderer = new THREE.WebGLRenderer( { antialias: true } );
+			renderer.setPixelRatio( window.devicePixelRatio );
+			renderer.setSize( window.innerWidth, window.innerHeight );
+			container.appendChild( renderer.domElement );
+
+			const scene = new THREE.Scene();
+			scene.background = new THREE.Color( 0x03040c );
+			scene.fog = new THREE.FogExp2( 0x03040c, 0.016 );
+
+			const camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.1, 100 );
+			const CAM_START = new THREE.Vector3( 0, 4.5, 18 );
+			const CAM_END = new THREE.Vector3( 0, 1.1, 10.5 );
+			camera.position.copy( CAM_START );
+
+			const controls = new OrbitControls( camera, renderer.domElement );
+			controls.target.set( 0, 0.5, 0 );
+			controls.enableDamping = true;
+			controls.dampingFactor = 0.08;
+			controls.autoRotate = true;
+			controls.autoRotateSpeed = 0.5;
+			controls.minDistance = 4;
+			controls.maxDistance = 30;
+			controls.enabled = false; // enabled after the intro fly-in
+
+			// ------------------------------------------------------------------
+			// lights
+			// ------------------------------------------------------------------
+
+			scene.add( new THREE.AmbientLight( 0x334466, 1.6 ) );
+
+			const dirLight = new THREE.DirectionalLight( 0xffffff, 1.2 );
+			dirLight.position.set( 3, 5, 4 );
+			scene.add( dirLight );
+
+			const coreLight = new THREE.PointLight( 0x4488ff, 30, 30 );
+			coreLight.position.set( 0, 2.5, 3 );
+			scene.add( coreLight );
+
+			// ------------------------------------------------------------------
+			// the self-typing 3D code editor
+			// ------------------------------------------------------------------
+
+			const W = 1024, H = 640;
+			const CHROME_H = 48, PAD_TOP = 20, LINE_H = 28, PAD_LEFT = 40, NUM_W = 44;
+			const FONT = '18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+			const editorCanvas = document.createElement( 'canvas' );
+			editorCanvas.width = W;
+			editorCanvas.height = H;
+			const ctx = editorCanvas.getContext( '2d' );
+			ctx.font = FONT;
+			const CHAR_W = ctx.measureText( 'M' ).width;
+
+			const editorTexture = new THREE.CanvasTexture( editorCanvas );
+			editorTexture.colorSpace = THREE.SRGBColorSpace;
+
+			// VS Code "Dark+"-ish palette
+			const C = {
+				comment: '#6a9955',
+				keyword: '#c586c0',
+				string: '#ce9178',
+				number: '#b5cea8',
+				func: '#dcdcaa',
+				type: '#4ec9b0',
+				var_: '#9cdcfe',
+				punct: '#d4d4d4',
+				numline: '#5c6370'
+			};
+			const KEYWORDS = new Set( [ 'const', 'let', 'var', 'function', 'return', 'new', 'import', 'from', 'export', 'if', 'else', 'for', 'while', 'class', 'this', 'await', 'async' ] );
+
+			function tokenize( str ) {
+
+				const tokens = [];
+				const re = /(\/\/.*$)|('(?:[^'\\]|\\.)*')|(\b\d[\w.]*\b)|(\b[A-Za-z_$][\w$]*\b)|(\s+)|([^\sA-Za-z0-9_$]+)/gm;
+				let m;
+				while ( ( m = re.exec( str ) ) !== null ) {
+
+					if ( m[ 1 ] !== undefined ) tokens.push( [ m[ 1 ], C.comment ] );
+					else if ( m[ 2 ] !== undefined ) tokens.push( [ m[ 2 ], C.string ] );
+					else if ( m[ 3 ] !== undefined ) tokens.push( [ m[ 3 ], C.number ] );
+					else if ( m[ 4 ] !== undefined ) {
+
+						const isCall = /^\s*\(/.test( str.slice( re.lastIndex ) );
+						const color = KEYWORDS.has( m[ 4 ] ) ? C.keyword : isCall ? C.func : /^[A-Z]/.test( m[ 4 ] ) ? C.type : C.var_;
+						tokens.push( [ m[ 4 ], color ] );
+
+					} else if ( m[ 5 ] !== undefined ) tokens.push( [ m[ 5 ], C.punct ] );
+					else tokens.push( [ m[ 6 ], C.punct ] );
+
+				}
+				return tokens;
+
+			}
+
+			let snippetIndex = 0;
+			let typedCount = 0;
+			let charTimer = 0;
+			let holdTimer = 0;
+			const CHAR_INTERVAL = 0.028; // seconds per character
+			const HOLD_TIME = 3.0; // pause between snippets
+
+			function drawEditor( time ) {
+
+				const snippet = SNIPPETS[ snippetIndex ];
+
+				// background
+				const grad = ctx.createLinearGradient( 0, 0, 0, H );
+				grad.addColorStop( 0, '#0d1117' );
+				grad.addColorStop( 1, '#0a0e16' );
+				ctx.fillStyle = grad;
+				ctx.fillRect( 0, 0, W, H );
+
+				// window chrome
+				ctx.fillStyle = '#161b22';
+				ctx.fillRect( 0, 0, W, CHROME_H );
+				ctx.fillStyle = '#21262d';
+				ctx.fillRect( 0, CHROME_H - 1, W, 1 );
+
+				const dots = [ '#ff5f56', '#ffbd2e', '#27c93f' ];
+				for ( let i = 0; i < 3; i ++ ) {
+
+					ctx.beginPath();
+					ctx.fillStyle = dots[ i ];
+					ctx.arc( 26 + i * 24, CHROME_H / 2, 7, 0, Math.PI * 2 );
+					ctx.fill();
+
+				}
+
+				ctx.font = '14px ui-monospace, Menlo, Consolas, monospace';
+				ctx.fillStyle = '#8b949e';
+				ctx.textAlign = 'center';
+				ctx.textBaseline = 'middle';
+				ctx.fillText( snippet.file + ' — three.js', W / 2, CHROME_H / 2 + 1 );
+				ctx.textAlign = 'left';
+
+				// code
+				ctx.font = FONT;
+				ctx.textBaseline = 'top';
+				const revealed = snippet.source.slice( 0, typedCount );
+				const lines = revealed.split( '\n' );
+
+				for ( let i = 0; i < lines.length; i ++ ) {
+
+					const y = CHROME_H + PAD_TOP + i * LINE_H;
+
+					// line number
+					ctx.fillStyle = C.numline;
+					ctx.fillText( String( i + 1 ).padStart( 2, ' ' ), PAD_LEFT, y );
+
+					// tokens (monospace: every character, incl. whitespace, advances one column)
+					let x = PAD_LEFT + NUM_W;
+					for ( const [ text, color ] of tokenize( lines[ i ] ) ) {
+
+						ctx.fillStyle = color;
+						ctx.fillText( text, x, y );
+						x += text.length * CHAR_W;
+
+					}
+
+				}
+
+				// blinking cursor at the end of the revealed text
+				const cursorLine = lines[ lines.length - 1 ] || '';
+				const cursorY = CHROME_H + PAD_TOP + ( lines.length - 1 ) * LINE_H;
+				const cursorX = PAD_LEFT + NUM_W + cursorLine.length * CHAR_W;
+				if ( Math.floor( time * 2.5 ) % 2 === 0 ) {
+
+					ctx.fillStyle = '#58a6ff';
+					ctx.fillRect( cursorX + 1, cursorY + 2, Math.max( CHAR_W * 0.85, 8 ), LINE_H - 8 );
+
+				}
+
+				editorTexture.needsUpdate = true;
+
+			}
+
+			const editorTextureMesh = new THREE.Mesh(
+				new THREE.PlaneGeometry( 6.2, 3.875 ),
+				new THREE.MeshBasicMaterial( { map: editorTexture, toneMapped: false } )
+			);
+
+			const panelBack = new THREE.Mesh(
+				new THREE.PlaneGeometry( 6.45, 4.1 ),
+				new THREE.MeshBasicMaterial( { color: 0x070b14 } )
+			);
+			panelBack.position.z = - 0.03;
+
+			const panelBorder = new THREE.LineSegments(
+				new THREE.EdgesGeometry( new THREE.PlaneGeometry( 6.45, 4.1 ) ),
+				new THREE.LineBasicMaterial( { color: 0x2b6cb0, transparent: true, opacity: 0.9 } )
+			);
+			panelBorder.position.z = - 0.02;
+
+			const stage = new THREE.Group();
+			stage.add( panelBack, panelBorder, editorTextureMesh );
+			stage.position.y = 0.5;
+			scene.add( stage );
+
+			// ------------------------------------------------------------------
+			// floating code glyphs
+			// ------------------------------------------------------------------
+
+			function makeGlyph( text, color ) {
+
+				const c = document.createElement( 'canvas' );
+				c.width = c.height = 128;
+				const g = c.getContext( '2d' );
+				const hex = color.toString( 16 ).padStart( 6, '0' );
+				g.font = 'bold 64px ui-monospace, Menlo, Consolas, monospace';
+				g.textAlign = 'center';
+				g.textBaseline = 'middle';
+				g.shadowColor = '#' + hex;
+				g.shadowBlur = 26;
+				g.fillStyle = '#' + hex;
+				g.fillText( text, 64, 70 );
+				const tex = new THREE.CanvasTexture( c );
+				tex.colorSpace = THREE.SRGBColorSpace;
+				const sprite = new THREE.Sprite( new THREE.SpriteMaterial( {
+					map: tex,
+					transparent: true,
+					depthWrite: false,
+					blending: THREE.AdditiveBlending,
+					opacity: 0.9
+				} ) );
+				sprite.scale.setScalar( 1.2 );
+				return sprite;
+
+			}
+
+			const GLYPHS = [ '{', '}', '(', ')', ';', '=>', '[]', '&&', '//', 'fn', '()', '::', '*', '++', '</>' ];
+			const GLYPH_COLORS = [ 0x33ccff, 0xff5599, 0x9d7bff, 0x55ffcc ];
+			const glyphsGroup = new THREE.Group();
+			const glyphData = [];
+
+			for ( let i = 0; i < GLYPHS.length; i ++ ) {
+
+				const angle = ( i / GLYPHS.length ) * Math.PI * 2;
+				const sprite = makeGlyph( GLYPHS[ i ], GLYPH_COLORS[ i % GLYPH_COLORS.length ] );
+				const radius = 5.4;
+				const baseY = 0.5 + ( ( i % 3 ) - 1 ) * 1.1;
+				sprite.position.set( Math.cos( angle ) * radius, baseY, Math.sin( angle ) * radius * 0.75 );
+				glyphsGroup.add( sprite );
+				glyphData.push( { sprite, baseY, offset: i * 1.7 } );
+
+			}
+			scene.add( glyphsGroup );
+
+			// ------------------------------------------------------------------
+			// wireframe torus knot + glowing core
+			// ------------------------------------------------------------------
+
+			const torus = new THREE.Mesh(
+				new THREE.TorusKnotGeometry( 1.7, 0.05, 220, 12 ),
+				new THREE.MeshBasicMaterial( { color: 0x2e6bff, wireframe: true, transparent: true, opacity: 0.35 } )
+			);
+			torus.position.set( 0, 0.5, -2.6 );
+			scene.add( torus );
+
+			const core = new THREE.Mesh(
+				new THREE.IcosahedronGeometry( 0.55, 0 ),
+				new THREE.MeshStandardMaterial( {
+					color: 0x0a0f1e,
+					emissive: 0x2277ff,
+					emissiveIntensity: 0.9,
+					metalness: 0.8,
+					roughness: 0.25,
+					flatShading: true
+				} )
+			);
+			core.position.copy( torus.position );
+			scene.add( core );
+
+			// ------------------------------------------------------------------
+			// grid floor + starfield
+			// ------------------------------------------------------------------
+
+			const grid = new THREE.GridHelper( 60, 60, 0x1a4dff, 0x0a1a3a );
+			grid.position.y = - 2.7;
+			grid.material.transparent = true;
+			grid.material.opacity = 0.5;
+			scene.add( grid );
+
+			const STAR_COUNT = 1500;
+			const starPositions = new Float32Array( STAR_COUNT * 3 );
+			for ( let i = 0; i < STAR_COUNT; i ++ ) {
+
+				const r = 18 + Math.random() * 40;
+				const theta = Math.random() * Math.PI * 2;
+				const phi = Math.acos( 2 * Math.random() - 1 );
+				starPositions[ i * 3 + 0 ] = r * Math.sin( phi ) * Math.cos( theta );
+				starPositions[ i * 3 + 1 ] = r * Math.cos( phi ) * 0.6;
+				starPositions[ i * 3 + 2 ] = r * Math.sin( phi ) * Math.sin( theta );
+
+			}
+			const starGeo = new THREE.BufferGeometry();
+			starGeo.setAttribute( 'position', new THREE.BufferAttribute( starPositions, 3 ) );
+			const stars = new THREE.Points( starGeo, new THREE.PointsMaterial( {
+				color: 0x8fb7ff,
+				size: 0.07,
+				transparent: true,
+				opacity: 0.75
+			} ) );
+			scene.add( stars );
+
+			// ------------------------------------------------------------------
+			// animation loop
+			// ------------------------------------------------------------------
+
+			const clock = new THREE.Clock();
+			const INTRO_TIME = 2.2;
+
+			function animate() {
+
+				const dt = clock.getDelta();
+				const t = clock.getElapsedTime();
+
+				// intro fly-in, then hand over to OrbitControls
+				if ( t < INTRO_TIME ) {
+
+					const k = 1 - Math.pow( 1 - t / INTRO_TIME, 3 );
+					camera.position.lerpVectors( CAM_START, CAM_END, k );
+					camera.lookAt( controls.target );
+
+				} else {
+
+					controls.enabled = true;
+					controls.update();
+
+				}
+
+				// typing machine
+				const snippet = SNIPPETS[ snippetIndex ];
+				if ( typedCount < snippet.source.length ) {
+
+					charTimer += dt;
+					while ( charTimer >= CHAR_INTERVAL && typedCount < snippet.source.length ) {
+
+						charTimer -= CHAR_INTERVAL;
+						typedCount ++;
+
+					}
+
+				} else {
+
+					holdTimer += dt;
+					if ( holdTimer >= HOLD_TIME ) {
+
+						holdTimer = 0;
+						charTimer = 0;
+						typedCount = 0;
+						snippetIndex = ( snippetIndex + 1 ) % SNIPPETS.length;
+
+					}
+
+				}
+				drawEditor( t );
+
+				// floating stage
+				stage.position.y = 0.5 + Math.sin( t * 0.8 ) * 0.14;
+				stage.rotation.y = Math.sin( t * 0.3 ) * 0.09;
+				stage.rotation.x = Math.sin( t * 0.5 ) * 0.02;
+
+				// orbiting glyphs
+				glyphsGroup.rotation.y = t * 0.14;
+				for ( const g of glyphData ) {
+
+					g.sprite.position.y = g.baseY + Math.sin( t * 1.2 + g.offset ) * 0.35;
+					g.sprite.material.rotation = Math.sin( t * 0.6 + g.offset ) * 0.25;
+
+				}
+
+				// core + knot + stars
+				torus.rotation.x = t * 0.25;
+				torus.rotation.y = t * 0.18;
+				core.rotation.x = - t * 0.4;
+				core.rotation.y = t * 0.6;
+				core.scale.setScalar( 1 + Math.sin( t * 2.2 ) * 0.08 );
+				coreLight.intensity = 26 + Math.sin( t * 2.2 ) * 8;
+				stars.rotation.y = t * 0.008;
+
+				renderer.render( scene, camera );
+
+			}
+
+			renderer.setAnimationLoop( animate );
+
+			// ------------------------------------------------------------------
+			// resize
+			// ------------------------------------------------------------------
+
+			window.addEventListener( 'resize', () => {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			} );
+
+		</script>
+	</body>
+</html>
