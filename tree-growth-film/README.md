@@ -42,6 +42,10 @@ Hasil di `out/`:
 - `dari-biji-score.wav` — skor terpisah
 - `dari-biji-render.json` — dimensi, frame, durasi (verifikasi)
 
+Salinan unduhan juga tersedia di folder **`video/`** dalam repo ini:
+`video/dari-biji-final.mp4` (video + musik), `video/dari-biji-contact.jpg`
+(lembar kontak), `video/dari-biji-score.wav` (skor).
+
 Mode QA: `--grid 24`, `--strip 48,12`, `--only 48,505,1200` (lihat
 `SKILL.md` di repo skill untuk detail).
 
