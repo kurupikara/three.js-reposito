@@ -1,0 +1,477 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DARI BIJI — 60s tree film (canvas 2D × three.js)</title>
+<style>
+  body{margin:0;background:#111;color:#ccc;font:13px/1.4 ui-monospace,Menlo,monospace;display:flex;flex-direction:column;align-items:center;gap:10px;padding:12px}
+  canvas#c{width:min(96vw,1100px);height:auto;background:#000;box-shadow:0 0 0 1px #333}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}
+  button{background:#222;color:#ddd;border:1px solid #444;padding:4px 10px;cursor:pointer;font:inherit}
+  input[type=range]{width:320px}
+</style>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script src="core.js"></script>
+<script src="studio.js"></script>
+<script src="vendor/three.iife.js"></script>
+<script src="tree3d.js"></script>
+<script>
+'use strict';
+// Lock the film canvas to Skia's CPU backend before defineFilm takes its
+// context: on software-GL Chromium a GPU-backed 2D canvas defers all raster to
+// readback and each frame export then costs seconds. Same context object, but
+// drawing executes inline and toDataURL is cheap.
+document.getElementById('c').getContext('2d', { willReadFrequently: true });
+// ============================================================
+// DARI BIJI (From a Seed). A tree from seed to full-grown, 60 seconds.
+// Method: mixed media. The world is drawn by hand in Canvas 2D (paper, soil,
+// sky, weather, birds, lettering — the hand-drawn-canvas-animation engine).
+// The tree itself is grown in three.js (this repo's build, bundled to
+// vendor/three.iife.js) as a paper-diorama 3D puppet with toon bands and ink
+// outlines, composited into the drawing. The story of the media IS the story:
+// an ink sapling peels off the page and keeps growing in space (the LIFT).
+//
+// Format 16:9, logical 1920x1080, 24 fps, exactly 60.0 s (1440 drawn frames).
+// Draw relative to CX, CY, W, H. World == logical at zoom 1; soil line GY.
+//
+// t      dur   scene       camera              what changes                                   sound
+// 0.0    5.0   grow        macro, seed         a seed falls onto the soil, rain wets it       thud, rain
+// 5.0    6.0   grow        pulls back          the seed cracks; roots draw downward           crack, low plucks
+// 11.0   8.5   grow        to park at 17       stem breaks soil, leaves unfurl (ink)          rising motif
+// 19.5   2.5   grow        parked              THE LIFT: construction lines; the ink sapling  shimmer
+//                                               peels off the page into a 3D tree
+// 22.0   12.0  grow        slow pull back      3D growth: trunk, boughs, twigs, leaves pop    warm bed
+// 34.0   6.0   grow        drifts right        autumn: gold, wind gusts, leaves fall          wind
+// 40.0   5.3   grow        closer              winter night: bare 3D tree, snow, moon         bells
+// 45.3   6.7   grow        wide pull back      spring: leaves burst back, tree full & big     swell + chirps
+// 52.0   8.0   card        static              ink tree on paper, title DARI BIJI, sign-off   resolve
+// ============================================================
+
+// ===================== PALETTE =====================
+usePalette(makePalette({
+  paper: '#f2e8d5', paperBand: 'rgba(255,242,214,.6)', ink: '#241a12', night: '#101423',
+  chalk: '#e9eefc', chalkDim: '#8d97c9', guide: 'rgba(70,100,255,.5)',
+  fills: ['#5d8f4e', '#8fbf6a', '#8a6242', '#c9a06a', '#3f6b3a'],
+  shade: '#3a2214', light: '#fff3d8', blush: '#d98a4f',
+  accents: ['#e0a526', '#c8473f', '#2b5fb8', '#f2c14e'],
+  inks: ['#241a12', '#c8473f', '#3f6b3a'], finish: 'ink',
+}, 'paperInk'));
+
+// ===================== WORLD & CAMERA =====================
+const GY = 830;                 // soil surface (world y, down positive)
+const SX = 938, SY = 864;       // seed at rest, in the soil (picture-book x-ray)
+const TB = [SX, GY];            // tree base: the 3D tree grows from the surface crack
+const LIFT0 = 19.5, LIFT1 = 21.5, WINTER0 = 40, WINTER1 = 45.3, CARD = 52;
+// camera keys: [t, x, y, zoom] — world point (x,y) at frame centre
+const CAMK = [
+  [0, 930, 800, 2.15], [3.2, 934, 836, 2.1], [5.6, 936, 868, 1.95],
+  [8.2, 936, 852, 1.7], [11, 940, 806, 1.4], [14, 948, 760, 1.18],
+  [17, 960, 700, 1], [LIFT1, 960, 700, 1],                    // park: hold for the LIFT
+  [26, 960, 636, .92], [31, 962, 556, .78], [34, 964, 500, .68],
+  [37, 1005, 478, .64], [WINTER0, 1032, 458, .66], [43, 1018, 444, .68],
+  [45.3, 1008, 440, .66], [48, 980, 448, .6], [CARD, 960, 442, .54],
+];
+// 3D tree: wanted total height in world units (the 2D sapling is 300 at the lift)
+const SIZEK = [[LIFT0, 300], [LIFT1, 312], [26, 430], [31, 565], [34, 650], [40, 730], [45.3, 770], [48, 880], [CARD, 990]];
+// growth drivers for TREE3D (pure functions of t)
+function treeState(t) {
+  const g = key(t, [[LIFT0, .16], [LIFT1, .185], [26, .42], [31, .58], [34, .68], [40, .8], [45.3, .85], [48, .93], [CARD, 1]]);
+  const sizeWU = key(t, SIZEK);
+  const leafG = t < 17 ? 0
+    : t < LIFT0 ? .28 * sm(17, LIFT0, t)
+    : t < 33 ? lerp(.28, .9, sm(LIFT1, 33, t))
+    : t < WINTER0 ? lerp(.9, .96, sm(33, WINTER0, t))
+    : t < 41 ? lerp(.96, 0, sm(WINTER0 + .8, 41, t))
+    : t < WINTER1 ? 0
+    : key(t, [[WINTER1, 0], [46.2, .55, easeOutBack], [48.5, 1]]);
+  const fall = t < 34 ? 0 : t < 39.5 ? sm(34, 39.5, t) : t < WINTER1 + .1 ? 1 : 0;
+  const autumn = sm(33, 36, t) * (1 - sm(WINTER0, WINTER0 + 2, t));
+  const snow = sm(WINTER0 + .5, WINTER0 + 2, t) * (1 - sm(WINTER1, WINTER1 + 1.6, t));
+  // wind lean: idle sway + two autumn gusts with a settle back
+  const gust = sm(35.0, 35.5, t) * (1 - sm(35.5, 37, t)) + .8 * sm(37.2, 37.7, t) * (1 - sm(37.7, 39.4, t));
+  const sway = .018 * Math.sin(t * .9) + drift(t, 3, { amp: .01, freq: .3 })
+    + gust * .075 + (t > 35 ? settle(t, 35.5, { amp: .03, freq: 1.6, decay: 2.2 }) + settle(t, 37.7, { amp: .024, freq: 1.4, decay: 2 }) : 0)
+    + (t > LIFT0 ? settle(t, LIFT0 + .2, { amp: .02, freq: 2, decay: 3 }) : 0);
+  const yaw = .12 * Math.sin(t * .07 + .4) + .028 * t;
+  return {
+    g, sizeWU, leafG, fall, autumn, snow, sway, yaw,
+    bark: PAL.fills[2], leaf: PAL.fills[0], leaf2: PAL.fills[1],
+    autumnLeaf: PAL.accents[0], autumnLeaf2: '#c97f2a',
+    ink: PAL.ink, snowCol: tint(PAL.paper, .55),
+  };
+}
+
+// ===================== 2D DRAWING KIT =====================
+const seedPts = (x, y, s, rot = 0) => ellPts(x, y, 15 * s, 24 * s, rot, 22);
+function drawSeed(c, x, y, s, rot, sq, t) {
+  c.save(); c.translate(x, y); c.rotate(rot); c.scale(1 / (1 + sq), 1 + sq); c.translate(-x, -y);
+  const p = seedPts(x, y, s, 0), box = [x - 18 * s, y - 28 * s, 36 * s, 56 * s];
+  c.fillStyle = shade(PAL.fills[2], .18); c.fill(polyPath(p));
+  surface(c, polyPath(p), box, { seed: 31, color: PAL.shade, density: .35, gap: 5, len: 8, alpha: .3, grain: 60 });
+  c.strokeStyle = PAL.ink; c.lineWidth = 3; wob(c, p, 1.6, 32, true, { pressure: .5 });
+  c.strokeStyle = PAL.light; c.lineWidth = 2; c.globalAlpha = .7;
+  wob(c, ellPts(x - 4 * s, y - 8 * s, 4 * s, 9 * s, .3, 14), 1, 33, true); c.globalAlpha = 1;
+  c.restore();
+}
+function drawHusk(c, t) {           // the cracked husk that stays under the tree
+  const u = sm(5, 6.4, t), s = 1;
+  for (const side of [-1, 1]) {
+    c.save(); c.translate(SX + side * (2 + 6 * u), SY + 2 * u); c.rotate(side * u * .5); c.translate(-SX, -SY);
+    const half = seedPts(SX, SY, s, 0).filter(p => side * (p[0] - SX) > -2);
+    if (half.length > 2) {
+      c.fillStyle = shade(PAL.fills[2], .3); c.fill(polyPath(half));
+      c.strokeStyle = PAL.ink; c.lineWidth = 2.4; wob(c, half, 1.4, 40 + side, true, { pressure: .45 });
+    }
+    c.restore();
+  }
+}
+function leaf2D(c, x, y, len, ang, fill, seed, sc = 1) {
+  c.save(); c.translate(x, y); c.rotate(ang); c.scale(sc, sc);
+  const p = [[0, 0], [len * .45, -len * .26], [len, -len * .02], [len * .5, len * .2], [0, 0]];
+  const q = smoothPts(p, true, 4, 1.2);
+  c.fillStyle = fill; c.fill(polyPath(q));
+  surface(c, polyPath(q), [0, -len * .3, len, len * .55], { seed: seed + 2, color: PAL.shade, density: .3, gap: 6, len: 7, alpha: .25, grain: 40 });
+  c.strokeStyle = PAL.ink; c.lineWidth = 2.2; wob(c, p, 1.2, seed, true, { pressure: .55 });
+  c.lineWidth = 1.3; wob(c, [[len * .06, 0], [len * .5, -len * .03], [len * .9, -.5]], .8, seed + 1, false, { pressure: .6 });
+  c.restore();
+}
+function drawSapling(c, t) {        // the ink sapling, 300 wu tall at the lift
+  const grow = sm(8.6, 15.2, t, easeOut), stemTop = 300;
+  const stem = [[SX, GY], [SX - 3, GY - 70], [SX + 2, GY - 140], [SX - 4, GY - 210], [SX + 4, GY - 268], [SX + 6, GY - stemTop]];
+  selfDraw(c, stem, grow * 1.06, 51, 1.6, false);
+  c.save(); c.strokeStyle = PAL.ink; c.lineWidth = 8;
+  selfDraw(c, stem.map(p => [p[0] - .8, p[1]]), grow * 1.06, 52, 1.2, false); c.restore();
+  const pairs = [
+    { at: [SX - 2, GY - 118], t0: 12, t1: 13.6, len: 62, a: 2.55, fill: PAL.fills[0], seed: 60 },
+    { at: [SX + 1, GY - 118], t0: 12.2, t1: 13.8, len: 62, a: .6, fill: PAL.fills[1], seed: 62 },
+    { at: [SX - 3, GY - 215], t0: 14.3, t1: 15.8, len: 55, a: 2.7, fill: PAL.fills[1], seed: 64 },
+    { at: [SX + 4, GY - 215], t0: 14.5, t1: 16, len: 55, a: .45, fill: PAL.fills[0], seed: 66 },
+    { at: [SX + 6, GY - 285], t0: 16, t1: 17.4, len: 42, a: 1.1, fill: PAL.fills[0], seed: 68 },
+  ];
+  for (const L of pairs) {
+    const k = easeOutBack(sm(L.t0, L.t1, t));
+    if (k > .01) leaf2D(c, L.at[0], L.at[1], L.len * clamp(k, 0, 1.1), L.a + drift(t, L.seed, { amp: .05, freq: .4 }), L.fill, L.seed, clamp(k, 0, 1));
+  }
+}
+function drawRoots(c, t) {
+  c.save(); c.strokeStyle = shade(PAL.ink, .1); c.lineCap = 'round';
+  const roots = [
+    { pts: [[SX, SY + 14], [SX - 3, SY + 52], [SX + 2, SY + 95], [SX - 4, SY + 132]], t0: 5.4, t1: 8, w: 5 },
+    { pts: [[SX - 2, SY + 40], [SX - 30, SY + 72], [SX - 46, SY + 108]], t0: 7, t1: 9.4, w: 3.6 },
+    { pts: [[SX + 1, SY + 55], [SX + 30, SY + 88], [SX + 45, SY + 122]], t0: 8, t1: 10.4, w: 3.6 },
+    { pts: [[SX - 2, SY + 88], [SX - 22, SY + 122], [SX - 20, SY + 152]], t0: 9.4, t1: 11.4, w: 2.6 },
+    { pts: [[SX + 2, SY + 100], [SX + 16, SY + 132], [SX + 12, SY + 158]], t0: 10, t1: 12, w: 2.4 },
+  ];
+  for (const R of roots) {
+    const g = sm(R.t0, R.t1, t, easeOut); if (g <= 0) continue;
+    c.lineWidth = R.w; selfDraw(c, R.pts, g * 1.05, 70 + R.w * 3, 1.3, false);
+    c.lineWidth = R.w * .55; selfDraw(c, R.pts.map(p => [p[0] + .5, p[1]]), g * 1.05, 80 + R.w * 3, 1, false);
+  }
+  c.restore();
+}
+function drawSoil(c, t) {
+  const top = [[-2600, GY + 3], [-900, GY - 5], [200, GY - 4], [520, GY + 5], [860, GY - 2], [SX, GY], [1200, GY + 6], [1520, GY - 3], [1840, GY + 4], [2700, GY - 4], [4600, GY + 2]];
+  const p = new Path2D(); const sm2 = smoothPts(top, false, 8);
+  p.moveTo(-2600, H + 3200); sm2.forEach(q => p.lineTo(q[0], q[1])); p.lineTo(4600, H + 3200); p.closePath();
+  c.fillStyle = t >= WINTER0 && t < WINTER1 + 1 ? mix(PAL.fills[2], PAL.night, .55) : mix(PAL.fills[2], PAL.shade, .35);
+  c.fill(p);
+  surface(c, p, [-2600, GY - 10, 7200, 1400], { seed: 12, color: PAL.shade, angle: 1.35, gap: 10, len: 15, alpha: .28, width: 1.3, grain: 2600 });
+  surface(c, p, [-2600, GY + 20, 7200, 400], { seed: 13, color: PAL.fills[3], angle: .4, gap: 16, len: 10, alpha: .1, grain: 700 });
+  c.strokeStyle = PAL.ink; c.lineWidth = 3.4; c.globalAlpha = .8;
+  wob(c, top, 2.2, 14, false, { pressure: .35 }); c.globalAlpha = 1;
+  const r = rng(15);
+  for (let k = 0; k < 64; k++) {
+    const x = -2500 + r() * 7000, y = GY + 24 + r() * 1300, s = 3 + r() * 7;
+    c.fillStyle = alpha(PAL.shade, .5); c.beginPath(); c.ellipse(x, y, s * 1.5, s, r() * 3, 0, TAU); c.fill();
+  }
+  // winter drift of snow on the ground
+  const sn = sm(WINTER0 + 1, WINTER0 + 3.2, t) * (1 - sm(WINTER1, WINTER1 + 1.4, t));
+  if (sn > 0) {
+    const m = [[-2600, GY + 2], [-400, GY - 8 * sn], [240, GY - 12 * sn], [620, GY - 4 * sn], [SX, GY - 16 * sn], [1240, GY - 6 * sn], [1680, GY - 14 * sn], [2700, GY - 6 * sn], [4600, GY - 2]];
+    const mp = new Path2D(), mm = smoothPts(m, false, 8);
+    mp.moveTo(-2600, GY + 2); mm.forEach(q => mp.lineTo(q[0], q[1])); mp.lineTo(4600, GY + 2); mp.closePath();
+    c.fillStyle = alpha(tint(PAL.paper, .55), .95 * sn); c.fill(mp);
+    c.strokeStyle = alpha(PAL.chalkDim, .5 * sn); c.lineWidth = 2; wob(c, m, 2, 16, false);
+  }
+}
+function drawSkyThings(c, t) {
+  // sun: arcs over the day; sets in autumn; a crescent moon rules the winter night
+  const sunK = [[3, 300, 520], [10, 520, 380], [20, 960, 250], [30, 1330, 300], [38, 1620, 430], [40.2, 1780, 560]];
+  const isNight = t >= WINTER0 && t < WINTER1;
+  if (t > 2.5 && t < 40.2 && !isNight) {
+    const s = key(t, sunK), up = 1 - sm(37, 40.2, t) * .5;
+    c.save(); c.globalAlpha = .9;
+    c.fillStyle = mix(PAL.light, PAL.blush, .25 + (1 - up) * .3);
+    c.beginPath(); c.arc(s[0], s[1], 46, 0, TAU); c.fill();
+    c.strokeStyle = PAL.blush; c.lineWidth = 3;
+    for (let k = 0; k < 8; k++) { const a = k / 8 * TAU + t * .05; wob(c, [[s[0] + Math.cos(a) * 62, s[1] + Math.sin(a) * 62], [s[0] + Math.cos(a) * 92, s[1] + Math.sin(a) * 92]], 1.5, 20 + k, false, { pressure: .6 }); }
+    c.restore();
+  }
+  if (isNight) {
+    const a = sm(WINTER0, WINTER0 + 1, t);
+    c.save(); c.globalAlpha = a; c.fillStyle = PAL.chalk;
+    c.beginPath(); c.arc(1500, 250, 52, 0, TAU); c.fill();
+    c.fillStyle = PAL.night; c.beginPath(); c.arc(1522, 236, 46, 0, TAU); c.fill();
+    c.restore();
+  }
+  if (t > 46) {  // the returning sun, warm and high right
+    const a = sm(46, 48, t), s = key(t, [[46, 1500, 560], [52, 1330, 300]]);
+    c.save(); c.globalAlpha = a * .95;
+    c.fillStyle = mix(PAL.light, PAL.blush, .3); c.beginPath(); c.arc(s[0], s[1], 52, 0, TAU); c.fill();
+    c.strokeStyle = PAL.blush; c.lineWidth = 3;
+    for (let k = 0; k < 8; k++) { const ang = k / 8 * TAU - t * .04; wob(c, [[s[0] + Math.cos(ang) * 70, s[1] + Math.sin(ang) * 70], [s[0] + Math.cos(ang) * 104, s[1] + Math.sin(ang) * 104]], 1.5, 30 + k, false, { pressure: .6 }); }
+    c.restore();
+  }
+  // clouds drift through the paper sky
+  if (!isNight) for (let k = 0; k < 3; k++) {
+    const x = ((k * 700 + 200 + t * (7 + k * 2)) % 2400) - 240, y = 180 + k * 85 + drift(t, 40 + k, { amp: 8, freq: .2 });
+    const pts = blob(x, y, 95 + k * 18, 34 + k * 6, 41 + k, { amp: .14 });
+    c.fillStyle = alpha(tint(PAL.paper, .55), .8); c.fill(polyPath(pts));
+    c.strokeStyle = alpha(PAL.ink, .25); c.lineWidth = 1.6; wob(c, pts, 1.2, 42 + k, true);
+  }
+}
+function drawRain(c, t, t0, t1) {
+  const a = sm(t0, t0 + .4, t) * (1 - sm(t1 - .5, t1, t)); if (a <= 0) return;
+  const r = rng(9); c.save(); c.strokeStyle = alpha(PAL.ink, .38 * a); c.lineWidth = 1.6; c.lineCap = 'round';
+  for (let k = 0; k < 46; k++) {
+    const x0 = -100 + r() * 2200, sp = 700 + r() * 500, ph = r() * 10;
+    const y = ((ph + t * sp) % 1150) + 120;
+    if (y > GY - 6) continue;
+    const x = x0 + (t * 40 % 200);
+    c.beginPath(); c.moveTo(x, y); c.lineTo(x - 7, y + 26); c.stroke();
+    if (y > GY - 40) { c.beginPath(); c.moveTo(x - 14, GY - 2); c.lineTo(x - 4, GY - 8); c.stroke(); }
+  }
+  c.restore();
+}
+function drawSnow(c, t) {
+  const a = sm(WINTER0, WINTER0 + .8, t) * (1 - sm(WINTER1 - .2, WINTER1 + .4, t)); if (a <= 0) return;
+  const r = rng(21); c.save(); c.fillStyle = alpha('#ffffff', .9 * a);
+  for (let k = 0; k < 90; k++) {
+    const x0 = r() * 2200 - 100, ph = r() * 20, sp = 60 + r() * 70;
+    const y = 60 + ((ph + t * sp) % 820), x = x0 + Math.sin(t * .8 + ph) * 30 + drift(t, k, { amp: 14, freq: .35 });
+    c.beginPath(); c.arc(x, y, 1.6 + r() * 3.4, 0, TAU); c.fill();
+  }
+  c.restore();
+}
+function drawFallingLeaves(c, t) {
+  const a = sm(34, 34.6, t) * (1 - sm(39, 39.5, t)); if (a <= 0) return;
+  const r = rng(23); c.save(); c.globalAlpha = a;
+  for (let k = 0; k < 24; k++) {
+    const t0 = 34 + r() * 4.4, u = (t - t0) / (2 + r() * 1.4);
+    if (u < 0 || u > 1) continue;
+    const x0 = 700 + r() * 520, y0 = 180 + r() * 160;
+    const x = x0 + Math.sin(u * 6 + k) * 60 + u * 240, y = y0 + easeIn(u) * 480 + u * 200;
+    leaf2D(c, x, y, 26 + r() * 12, u * 7 + k, r() > .5 ? PAL.accents[0] : PAL.accents[3], 100 + k, 1);
+  }
+  c.restore();
+}
+function drawBirds(c, t, i) {
+  const flocks = [[33, 35.5, 380, 3], [46.5, 52, 300, 5]];
+  for (const [t0, t1, y0, n] of flocks) {
+    const a = sm(t0, t0 + .4, t) * (1 - sm(t1 - .4, t1, t)); if (a <= 0) continue;
+    for (let k = 0; k < n; k++) {
+      const u = clamp((t - t0 - k * .3) / (t1 - t0), 0, 1);
+      const x = lerp(-120, 2100, u), y = y0 + k * 46 + Math.sin(u * 5 + k * 2) * 60 - u * (t0 > 40 ? 80 : 30);
+      const flap = pulse(i + k, 3) ? 1 : .25, s = 1 + k * .12;
+      c.save(); c.globalAlpha = a * .9; c.strokeStyle = PAL.ink; c.lineWidth = 2.4; c.lineCap = 'round';
+      wob(c, [[x - 18 * s, y], [x - 8 * s, y - 8 * flap * s], [x, y - s], [x + 8 * s, y - 8 * flap * s], [x + 18 * s, y]], 1.2, 200 + k, false, { pressure: .5 });
+      c.restore();
+    }
+  }
+}
+function drawGrass(c, t) {
+  const g = sm(45.8, 49, t); if (g <= 0) return;
+  const r = rng(27);
+  for (let k = 0; k < 52; k++) {
+    const x = -2400 + r() * 6800, len = (16 + r() * 22) * clamp(g * 1.2 - r() * .3, 0, 1);
+    const lean = drift(t, 200 + k, { amp: .12, freq: .5 });
+    plant(c, x, GY - 2, len, 0, 300 + k, { stem: PAL.fills[4], leaf: PAL.fills[0], flower: k % 7 === 0 ? PAL.accents[1] : null, angle: -Math.PI / 2 + lean, width: 1.6 });
+  }
+}
+function drawContactShadow(c, t) {
+  const g = key(t, SIZEK), w = 26 + g * .1;
+  c.save(); c.globalAlpha = .13 + .06 * sm(WINTER0, WINTER0 + 1, t);
+  c.fillStyle = PAL.shade;
+  c.fill(ellPath(TB[0] + 18, TB[1] + 8, w * 1.7, 10 + g * .015));
+  c.restore();
+}
+
+// transition FX around the lift
+function drawLiftFx(c, t) {
+  if (t < LIFT0 - .2 || t > LIFT1 + .4) return;
+  const a = sm(LIFT0 - .2, LIFT0 + .3, t) * (1 - sm(LIFT1 - .3, LIFT1 + .2, t));
+  c.save(); c.globalAlpha = a;
+  construction(c, SX + 4, GY - 160, 230, 44, PAL.guide, .8 * a);
+  // sparkles climbing the stem
+  for (let k = 0; k < 5; k++) {
+    const y = GY - 40 - k * 62, u = sm(LIFT0 + .25 + k * .14, LIFT0 + .8 + k * .14, t);
+    if (u > 0 && u < 1) aster(c, SX + 6 + Math.sin(k * 2) * 26, y, 26 + k * 3, 7, PAL.accents[0], 400 + k, Math.sin(u * Math.PI));
+  }
+  dotBurst(c, TB[0], TB[1] - 4, 90, 12, PAL.accents[3], 410, sm(LIFT0, LIFT0 + .9, t, easeOut));
+  c.restore();
+  if (t > LIFT0 + .1 && t < LIFT0 + .5) flash(c, alpha(tint(PAL.paper, .8), (1 - Math.abs(t - (LIFT0 + .2)) / .25) * .55));
+}
+
+// ===================== THE GROW SCENE (52 s) =====================
+const drawGL = (c, gl, a) => { c.save(); c.globalAlpha = a; resetT(c); c.drawImage(gl, 0, 0, W, H); c.restore(); };
+function sceneGrow(c, tau, i) {
+  const t = tau;
+  const isNight = t >= WINTER0 && t < WINTER1;
+  // --- screen-space backdrop ---
+  if (isNight) night(c, PAL.night, 5);
+  else paper(c, mix(PAL.paper, PAL.blush, .06 * sm(33, 36, t) * (1 - sm(WINTER0, WINTER0 + 2, t)) + .1 * sm(45.5, 48, t) * (1 - sm(50, 52, t))), PAL.paperBand, 5);
+  // --- world under one shared camera (2D + the 3D view both read it) ---
+  const v = key(t, CAMK), z = v[2];
+  cam(c, v[0], v[1], z);
+  drawSkyThings(c, t);
+  drawSoil(c, t);
+  drawContactShadow(c, t);
+  if (t < 22) { if (t >= 5) drawHusk(c, t); drawRoots(c, t); }
+  // phase A: the hand-drawn plant; phase B: the three.js tree
+  const d2 = t < LIFT0 ? 1 : 1 - sm(LIFT0 + .8, LIFT1 - .2, t);
+  if (d2 > 0 && t < LIFT1) { c.save(); c.globalAlpha = d2; drawSapling(c, t); if (t < 5.2) {
+      // the falling seed, then at rest until it cracks (drawHusk takes over at 5)
+      const u = sm(.3, 2.1, t, easeIn), s = arc([SX - 40, GY - 215], [SX, SY], u, 38);
+      const sq = t > 2.05 ? settle(t, 2.05, { amp: .3, freq: 2.6, decay: 5, phase: Math.PI / 2 }) : 0;
+      drawSeed(c, s[0], s[1], 1.15 + .06 * u, .3 - u * .3, sq, t);
+    } c.restore(); }
+  const d3 = sm(LIFT0 + .3, LIFT0 + 1.3, t);
+  if (d3 > 0 && t < CARD) {
+    const st = treeState(t);
+    const bx = (TB[0] - v[0]) * z + CX, by = (TB[1] - v[1]) * z + CY;
+    drawGL(c, TREE3D.render(st, { bx, by, scale: z }), d3);
+  }
+  // foreground life & weather
+  drawGrass(c, t);
+  drawFallingLeaves(c, t);
+  drawRain(c, t, 3.2, 6.2); drawRain(c, t, 28, 30.5);
+  drawSnow(c, t);
+  drawBirds(c, t, i);
+  drawLiftFx(c, t);
+  // paper grain over everything keeps the two media in one material
+  resetT(c); grain(c, rectPath(0, 0, W, H), [0, 0, W, H], 240, PAL.shade, .04, 9, 1.6);
+}
+
+// ===================== TITLE LETTERING =====================
+// single-stroke alphabet in a unit box (y down); every letter is self-drawn
+const GLYPH = {
+  D: [[[.12, .05], [.12, .95]], [[.12, .05], [.5, .1], [.68, .5], [.5, .9], [.12, .95]]],
+  A: [[[.05, .95], [.4, .05], [.75, .95]], [[.18, .62], [.62, .62]]],
+  R: [[[.12, .05], [.12, .95]], [[.12, .05], [.55, .08], [.62, .35], [.28, .48]], [[.32, .5], [.72, .95]]],
+  I: [[[.4, .05], [.4, .95]]],
+  B: [[[.12, .05], [.12, .95]], [[.12, .05], [.58, .08], [.62, .4], [.22, .5]], [[.22, .5], [.62, .58], [.65, .88], [.12, .95]]],
+  J: [[[.62, .05], [.62, .82], [.48, .95], [.22, .88]]],
+  ' ': null,
+};
+const ADV = { D: .95, A: .9, R: .85, I: .5, B: .9, J: .8, ' ': .45 };
+function drawWord(c, str, x, y, size, t, t0, t1) {
+  let px = x, si = 0;
+  const total = [...str].reduce((a, ch) => a + (ADV[ch] ?? .8), 0);
+  px -= total * size / 2;
+  c.save(); c.strokeStyle = PAL.ink; c.lineCap = 'round'; c.lineJoin = 'round';
+  for (const ch of str) {
+    const strokes = GLYPH[ch];
+    if (strokes) strokes.forEach((st, k) => {
+      const a0 = t0 + (si * .12 + k * .08), a1 = a0 + (t1 - t0) * .38;
+      c.lineWidth = size * .075;
+      selfDraw(c, st.map(([u, v]) => [px + u * size, y + v * size]), sm(a0, a1, t, easeOut) * 1.05, 500 + si * 3 + k, 2, false);
+    });
+    px += (ADV[ch] ?? .8) * size; si++;
+  }
+  c.restore();
+}
+
+// ===================== THE CARD (8 s) =====================
+function sceneCard(c, tau, i) {
+  const t = tau;                 // 0..8
+  paper(c, PAL.paper, PAL.paperBand, 5);
+  // the grown tree as an ink drawing on the page
+  const base = [640, 850], h = 560;
+  const trunk = [[base[0], base[1]], [base[0] - 14, base[1] - h * .32], [base[0] + 10, base[1] - h * .6], [base[0] - 4, base[1] - h * .82]];
+  const boughs = [
+    [[base[0] - 6, base[1] - h * .42], [base[0] - 130, base[1] - h * .58], [base[0] - 190, base[1] - h * .72]],
+    [[base[0] + 4, base[1] - h * .55], [base[0] + 120, base[1] - h * .7], [base[0] + 185, base[1] - h * .8]],
+    [[base[0], base[1] - h * .7], [base[0] - 70, base[1] - h * .88], [base[0] - 95, base[1] - h * 1.02]],
+    [[base[0] - 2, base[1] - h * .78], [base[0] + 75, base[1] - h * .92], [base[0] + 105, base[1] - h * 1.05]],
+  ];
+  c.save(); c.strokeStyle = PAL.ink; c.lineCap = 'round';
+  c.lineWidth = 17; selfDraw(c, trunk, sm(.3, 1.6, t, easeOut) * 1.04, 600, 3, false);
+  c.lineWidth = 8.5;
+  boughs.forEach((b, k) => selfDraw(c, b, sm(1.3 + k * .22, 2.4 + k * .22, t, easeOut) * 1.04, 610 + k, 2, false));
+  c.restore();
+  // crown: soft ink masses with hatching
+  const crown = [[520, 300, 120, 78], [660, 250, 135, 88], [800, 305, 118, 74], [590, 385, 110, 66], [745, 390, 108, 64], [478, 408, 88, 56], [862, 372, 82, 52]];
+  crown.forEach(([x, y, rx, ry], k) => {
+    const a = sm(2.2 + k * .18, 3.1 + k * .18, t); if (a <= 0) return;
+    const pts = blob(x, y, rx, ry, 620 + k, { amp: .1 }), p = polyPath(pts);
+    c.save(); c.globalAlpha = a;
+    c.fillStyle = mix(PAL.fills[0], PAL.fills[4], .3 + .15 * k); c.fill(p);
+    surface(c, p, [x - rx, y - ry, rx * 2, ry * 2], { seed: 630 + k, color: PAL.fills[4], angle: .9, gap: 6, len: 10, alpha: .3, grain: 120 });
+    c.strokeStyle = PAL.ink; c.lineWidth = 3; wob(c, pts, 2, 640 + k, true, { pressure: .4 });
+    c.restore();
+  });
+  // title
+  drawWord(c, 'DARI BIJI', 1320, 380, 150, t, 3.1, 5.2);
+  // handText sets globalAlpha itself, so fade the ink colour toward paper
+  const fadeIn = sm(5.1, 5.8, t);
+  if (fadeIn > 0) {
+    const inkFade = mix(PAL.paper, PAL.ink, fadeIn), ink2Fade = mix(PAL.paper, PAL.blush, fadeIn), shadeFade = mix(PAL.paper, PAL.shade, fadeIn);
+    handText(c, 'sebuah pohon tumbuh: tinta, kanvas & three.js', 1320, 590, { size: 36, ink: inkFade, ink2: ink2Fade, align: 'center' });
+    handText(c, 'film 60 detik · 24 fps · 1440 frame', 1320, 646, { size: 24, ink: shadeFade, ink2: null, align: 'center' });
+  }
+  signOff(c, 'tumbuh', 'dari biji', { x: 1430, y: 860, size: 46, progressA: sm(5.5, 6.3, t, easeOut), progressB: sm(6.0, 6.8, t, easeOut) });
+  seedDot(c, 640 - 4, 858, 10, PAL.ink, PAL.accents[0]);
+  resetT(c); grain(c, rectPath(0, 0, W, H), [0, 0, W, H], 240, PAL.shade, .04, 9, 1.6);
+}
+
+// ===================== SCORE =====================
+function score(ac, t0, dest) {
+  const master = ac.createGain(); master.gain.value = .55; master.connect(dest);
+  const hz = (o, s) => pentHz(o, s, 174.6);
+  const key2 = (t, f, g = .15, d = 2.2) => { note(ac, master, f, t0, t, d, 'sine', g); note(ac, master, f * 2, t0, t, d * .5, 'triangle', g * .16); };
+  const sr = ac.sampleRate, nb = ac.createBuffer(1, sr * 2, sr), ch = nb.getChannelData(0), r = rng(5);
+  for (let q = 0; q < ch.length; q++) ch[q] = r() * 2 - 1;
+  const noise = (a, b, lvl, freq, Q = .8) => { const s = ac.createBufferSource(); s.buffer = nb; s.loop = true;
+    const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = Q;
+    const e = ac.createGain(); e.gain.setValueAtTime(0, t0 + a); e.gain.linearRampToValueAtTime(lvl, t0 + a + Math.min(.3, (b - a) / 2));
+    e.gain.setValueAtTime(lvl, t0 + b - .05); e.gain.linearRampToValueAtTime(0, t0 + b + .25);
+    s.connect(f); f.connect(e); e.connect(master); s.start(t0 + a); s.stop(t0 + b + .35); };
+  // 0-5 the seed lands, the rain comes
+  key2(.2, hz(-1, 0), .1, 4); noiseBurst(ac, master, t0, 2.1, .5, .35, 7); note(ac, master, hz(-2, 0), t0, 2.1, 1.2, 'sine', .3);
+  for (let k = 0; k < 14; k++) noiseBurst(ac, master, t0, 3.4 + k * .18, .05, .08, k + 3);
+  // 5-11 roots and a crack
+  noiseBurst(ac, master, t0, 5.1, .12, .3, 11); key2(5.3, hz(0, 2));
+  [[5.8, -1, 2], [7.0, -1, 0], [8.4, 0, 0], [9.6, 0, 2], [10.8, 0, 4]].forEach(([t, o, s]) => key2(t, hz(o, s), .13, 3));
+  // 11-19.5 the stem rises
+  [[11.5, 0, 0], [12.4, 0, 2], [13.3, 0, 4], [14.4, 1, 0], [15.6, 1, 2], [16.8, 1, 4], [18.2, 2, 0]].forEach(([t, o, s]) => key2(t, hz(o, s), .14, 2.6));
+  // 19.7 the lift: shimmer
+  for (let k = 0; k < 7; k++) note(ac, master, hz(3, (k * 3) % 5), t0, 19.6 + k * .09, 1.4, 'sine', .05);
+  note(ac, master, hz(1, 0), t0, 19.5, 3.2, 'triangle', .12);
+  // 22-34 warm bed, slow growth melody
+  [[22, 0, 0], [22, 1, 2], [24.5, 0, 4], [26.5, 1, 0], [28.5, 1, 2], [30.5, 1, 4], [32, 2, 0], [33.2, 1, 4]].forEach(([t, o, s]) => key2(t, hz(o, s), .13, 3.4));
+  [[22.8, 2, 2], [25, 2, 4], [27.5, 2, 1], [29.8, 2, 3], [31.8, 3, 0]].forEach(([t, o, s]) => key2(t, hz(o, s), .06, 1.6));
+  // 34-40 autumn wind
+  noise(34, 39.6, .16, 620, .5); noise(35.2, 36.4, .1, 2400, .4); noise(37.3, 38.8, .1, 2400, .4);
+  [[34.5, 1, 1], [36, 1, 3], [37.5, 0, 4], [39, 0, 1]].forEach(([t, o, s]) => key2(t, hz(o, s), .1, 2.8));
+  // 40-45 winter bells
+  [[40.4, 2, 0], [41.8, 2, 2], [43.2, 2, 1], [44.4, 3, 0]].forEach(([t, o, s]) => key2(t, hz(o, s), .05, 2.2));
+  // 45.3-52 spring and the full tree
+  [[45.4, 0, 0], [45.4, 1, 0], [45.4, 1, 2], [46.2, 1, 4], [47.4, 2, 0], [48.4, 1, 2], [49.4, 2, 1], [50.4, 2, 2], [51.2, 2, 4]].forEach(([t, o, s]) => key2(t, hz(o, s), .15, 3));
+  for (let k = 0; k < 6; k++) note(ac, master, hz(3, [0, 2, 4, 1, 3, 4][k]), t0, 47.2 + k * .5, .3, 'triangle', .04);   // chirps
+  // 52-60 resolve
+  [[52.2, 0, 0], [52.2, 1, 2], [52.2, 1, 4], [54.5, 1, 0], [56.2, 0, 2], [57.8, -1, 0]].forEach(([t, o, s]) => key2(t, hz(o, s), .14, 4));
+}
+
+// ===================== FILM =====================
+const TIMELINE = [
+  { name: 'grow', dur: CARD, fn: sceneGrow },
+  { name: 'card', dur: 8, fn: sceneCard },
+];
+defineFilm({ timeline: TIMELINE, score, format: { ar: '16:9', width: 1920 }, fps: 24 });
+
+// Delivery adaptation: export drawn frames as JPEG (q .93) instead of PNG.
+// Software Chromium's PNG encoder takes seconds per full-HD grainy paper frame;
+// ffmpeg probes the bytes (JPEG-in-.png is fine) and x264 CRF18 is the real codec.
+{
+  const cv = document.getElementById('c');
+  window.__frame = i => { window.__drawFrame(i); return cv.toDataURL('image/jpeg', .93); };
+}
+</script>
